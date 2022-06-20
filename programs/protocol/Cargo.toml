@@ -1,0 +1,28 @@
+[package]
+name = "protocol"
+version = "0.1.0"
+description = "Created with Anchor"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "protocol"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[profile.release]
+overflow-checks = true
+
+[dependencies]
+anchor-lang = "0.24.2"
+anchor-spl = "0.24.2"
+bigdecimal = "0.3.0"
+bytemuck = "1.9.1"
+pyth-sdk-solana = "0.4.1"
+scale-asset-pool = { path = "../scale-asset-pool", features = ["cpi"]}
+solana-sdk = "~1.9.13"
