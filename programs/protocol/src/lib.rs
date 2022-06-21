@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use bigdecimal::{BigDecimal, ToPrimitive, One};
 use byteorder::ByteOrder;
 
 declare_id!("EuKUep9dcVnTbXHoX3UxpBbrJXY3nVAz1THwwHjtuMp1");
@@ -67,26 +66,24 @@ pub mod protocol {
             PositionType::Isolated => {
                 match args.direction {
                     Direction::Long => {
-                        let ask = BigDecimal::from(
+                        let ask =
                             (current_price.price as u64)
                                 .checked_add(current_price.conf)
-                                .ok_or(ProtocolError::InvalidPrice)?
-                        );
+                                .ok_or(ProtocolError::InvalidPrice)?;
 
-                        check_slippage(&ask, args)?;
+                        check_slippage(ask, args)?;
 
-                        position.amount = get_asset_amount(args.leverage_margin, &ask).to_string();
+                        position.amount = get_asset_amount(args.leverage_margin, ask);
                     }
                     Direction::Short => {
-                        let bid = BigDecimal::from(
+                        let bid = 
                             (current_price.price as u64)
                                 .checked_sub(current_price.conf)
-                                .ok_or(ProtocolError::InvalidPrice)?
-                        );
+                                .ok_or(ProtocolError::InvalidPrice)?;
 
-                        check_slippage(&bid, args)?;
+                        check_slippage(bid, args)?;
 
-                        position.amount = get_asset_amount(args.leverage_margin, &bid).to_string();
+                        position.amount = get_asset_amount(args.leverage_margin, bid);
                     }
                 }
             }
@@ -228,7 +225,7 @@ pub struct Position {
     pub liquidation: u64,
     pub created_at: i64,
     pub slot: u64,
-    pub amount: String,
+    pub amount: u64,
 }
 
 impl Position {
@@ -246,12 +243,7 @@ impl Position {
         + 8
         + 8
         + 8
-        + 200;
-
-    #[inline(always)]
-    pub fn amount(&self) -> BigDecimal {
-        std::str::FromStr::from_str(&self.amount).unwrap()
-    }
+        + 8;
 
     #[inline(always)]
     pub fn is_liquidated(&self, price: u64) -> bool {
@@ -274,8 +266,11 @@ impl Position {
             .checked_sub(self.created_at).unwrap()
             .checked_add(86400).unwrap()
             .checked_div(86400).unwrap() as u64;
-        let assets = self.amount() * BigDecimal::from(self.leverage);
-        (assets * BigDecimal::from(days) * BigDecimal::from(self.overnight_fee_numerator) / BigDecimal::from(10000)).to_u64().unwrap()
+        self.amount
+            .checked_mul(self.leverage).unwrap()
+            .checked_mul(days).unwrap()
+            .checked_mul(self.overnight_fee_numerator).unwrap()
+            .checked_div(10000).unwrap()
     }
 
     #[inline(always)]
@@ -290,54 +285,12 @@ impl Position {
     }
 
     pub fn get_profit(&self, current_price: &pyth_sdk_solana::Price, time: i64) -> Result<u64> {
-        let sold_price = current_price.price
-            .checked_sub(current_price.conf as i64)
-            .ok_or(ProtocolError::InvalidPrice)?;
         Ok(match self.direction {
             Direction::Long => {
-                if sold_price < self.last_price {
-                    // loss
-                    let difference = self.last_price - sold_price;
-                    self.margin
-                        .checked_sub(difference as u64)
-                        .ok_or(ProtocolError::InvalidPrice)?
-                        .checked_sub(self.overnight_fee(time))
-                        .ok_or(ProtocolError::InvalidPrice)?
-                } else {
-                    // earned
-                    let earned = (BigDecimal::from(sold_price) * self.amount())
-                        .to_u64()
-                        .ok_or(ProtocolError::InvalidPrice)?;
-                    self.margin
-                        .checked_sub(self.overnight_fee(time))
-                        .ok_or(ProtocolError::InvalidPrice)?
-                        .checked_add(earned)
-                        .ok_or(ProtocolError::InvalidPrice)?
-                }
+                unimplemented!()
             }
             Direction::Short => {
-                let bought_price = current_price.price
-                    .checked_add(current_price.conf as i64)
-                    .ok_or(ProtocolError::InvalidPrice)?;
-                if bought_price > self.last_price {
-                    // loss
-                    let difference = bought_price - self.last_price;
-                    self.margin
-                        .checked_sub(difference as u64)
-                        .ok_or(ProtocolError::InvalidPrice)?
-                        .checked_sub(self.overnight_fee(time))
-                        .ok_or(ProtocolError::InvalidPrice)?
-                } else {
-                    // earned
-                    let earned = (BigDecimal::from(sold_price) * self.amount())
-                        .to_u64()
-                        .ok_or(ProtocolError::InvalidPrice)?;
-                    self.margin
-                        .checked_sub(self.overnight_fee(time))
-                        .ok_or(ProtocolError::InvalidPrice)?
-                        .checked_add(earned)
-                        .ok_or(ProtocolError::InvalidPrice)?
-                }
+                unimplemented!()
             }
         })
     }
@@ -369,7 +322,9 @@ pub struct Create<'info> {
 pub struct Netoff<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
+    /// CHECK:
     pub price_a: UncheckedAccount<'info>,
+    /// CHECK:
     pub price_b: UncheckedAccount<'info>,
     #[account(mut,
         constraint = position.owner == payer.key(),
@@ -384,7 +339,9 @@ pub struct Netoff<'info> {
 pub struct IncreaseMargin<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
+    /// CHECK:
     pub price_a: UncheckedAccount<'info>,
+    /// CHECK:
     pub price_b: UncheckedAccount<'info>,
     #[account(mut,
         constraint = position.owner == payer.key(),
@@ -462,8 +419,11 @@ pub fn verify_and_extract(instruction_sysvar_account_info: &AccountInfo) -> Resu
 pub struct ProcessPosition<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
+    /// CHECK:
     pub pool: UncheckedAccount<'info>,
+    /// CHECK:
     pub price_a: UncheckedAccount<'info>,
+    /// CHECK:
     pub price_b: UncheckedAccount<'info>,
     #[account(mut,
         close = payer,
@@ -471,10 +431,11 @@ pub struct ProcessPosition<'info> {
     )]
     pub position: Account<'info, Position>,
     pub system_program: Program<'info, System>,
+    /// CHECK:
     #[account(
         constraint = instruction_sysvar_account_info.key() == anchor_lang::solana_program::sysvar::instructions::id(),
     )]
-    pub instruction_sysvar_account_info: AccountInfo<'info>,
+    pub instruction_sysvar_account_info: UncheckedAccount<'info>,
 }
 
 fn get_current_price<'a>(price_a: &'a UncheckedAccount, price_b: &'a UncheckedAccount, decimals: u8) -> Result<pyth_sdk_solana::Price> {
@@ -511,33 +472,35 @@ fn get_liquidation(price: i64, bond: u64, direction: Direction) -> u64 {
     }
 }
 
-fn get_asset_amount(leverage_margin: u64, price: &BigDecimal) -> BigDecimal {
-    BigDecimal::from(leverage_margin) / price
+fn get_asset_amount(leverage_margin: u64, price: u64) -> u64 {
+    leverage_margin.checked_div(price).unwrap()
 }
 
-fn check_slippage<'a>(price: &'a BigDecimal, args: PositionArgs) -> Result<()> {
-    let slippage = BigDecimal::from(args.slippage_numerator) / BigDecimal::from(10000u64);
-    let price_before = BigDecimal::from(
-        args.price
+fn check_slippage(price: u64, args: PositionArgs) -> Result<()> {
+    let price_before = args.price
             .checked_div(
                 10u64
                     .checked_pow(args.expo.abs() as u32)
                     .ok_or(ProtocolError::InvalidPrice)?
             )
-            .ok_or(ProtocolError::InvalidPrice)?
-    );
-    let one = BigDecimal::one();
+            .ok_or(ProtocolError::InvalidPrice)?;
 
     match args.direction {
         Direction::Long => {
             // the real price is higher than the given price
-            if price.cmp(&(price_before * (one + slippage))).is_ge() {
+            let real_price = price_before
+                .checked_mul(args.slippage_numerator + 10000).unwrap()
+                .checked_div(10000).unwrap();
+            if price.cmp(&real_price).is_ge() {
                 return err!(ProtocolError::SlippageReached);
             }
         }
         Direction::Short => {
             // the real price is lower than the given price
-            if price.cmp(&(price_before * (one - slippage))).is_le() {
+            let real_price = price_before
+                .checked_mul(10000 - args.slippage_numerator).unwrap()
+                .checked_div(10000).unwrap();
+            if price.cmp(&real_price).is_le() {
                 return err!(ProtocolError::SlippageReached);
             }
         }

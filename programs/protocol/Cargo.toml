@@ -21,7 +21,5 @@ overflow-checks = true
 [dependencies]
 anchor-lang = "0.24.2"
 anchor-spl = "0.24.2"
-bigdecimal = "0.3.0"
 byteorder = "1.4.3"
 pyth-sdk-solana = "0.4.1"
-solana-sdk = "~1.9.13"
