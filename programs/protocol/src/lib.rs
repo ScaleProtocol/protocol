@@ -1,7 +1,6 @@
 use anchor_lang::prelude::*;
-use bytemuck::{bytes_of, Pod, Zeroable};
-use solana_sdk::instruction::Instruction;
 use bigdecimal::{BigDecimal, ToPrimitive, One};
+use byteorder::ByteOrder;
 
 declare_id!("EuKUep9dcVnTbXHoX3UxpBbrJXY3nVAz1THwwHjtuMp1");
 
@@ -23,12 +22,20 @@ pub enum ProtocolError {
     InvalidArgs,
     #[msg("Invalid Signature")]
     InvalidSignature,
+    #[msg("Instruction At Wrong Index")]
+    InstructionAtWrongIndex,
+    #[msg("Invalid Account Data")]
+    InvalidAccountData,
+    #[msg("Invalid Ed25519 Instruction")]
+    InvalidEd25519Instruction,
+    #[msg("Invalid Authority")]
+    InvalidAuthority,
 }
 
 pub const MAX_LEVERAGE: u64 = 100;
 
 #[program]
-pub mod scale_protocol {
+pub mod protocol {
     use super::*;
 
     pub fn create(ctx: Context<Create>, index: u32, args: PositionArgs) -> Result<()> {
@@ -111,11 +118,9 @@ pub mod scale_protocol {
                 unimplemented!()
             }
             (Long, Short) => {
-                // can only be sold on lower price
                 unimplemented!()
             }
             (Short, Long) => {
-                // can only be bought on higher price
                 unimplemented!()
             }
         }
@@ -140,25 +145,24 @@ pub mod scale_protocol {
     }
 
     pub fn process_position<'info>(
-        ctx: Context<'_, '_, '_, 'info, ProcessPosition<'info>>, 
-        data: ProcessData,
+        ctx: Context<'_, '_, '_, 'info, ProcessPosition<'info>>,
     ) -> Result<u64> {
-        data.verify()
+        let authenticated = verify_and_extract(&ctx.accounts.instruction_sysvar_account_info)
             .map_err(|_| ProtocolError::InvalidSignature)?;
-        // assume that the position will be successfully processed
-        // set the position status into processed, give the close choice to user if they want delete the record
+
         let position = &mut ctx.accounts.position;
         position.status = PositionStatus::Processed;
 
-        // check args if the position is liquidated and skip the profit calculation
-        let returned_margin = if data.message.is_liquidated {
-            position.get_liquidated_margin(data.message.time)
+        require_eq!(authenticated.authority, position.authority, ProtocolError::InvalidAuthority);
+
+        let returned_margin = if authenticated.data.is_liquidated {
+            position.get_liquidated_margin(authenticated.data.time)
         } else {
             let current_price = get_current_price(
                     &ctx.accounts.price_a, 
                     &ctx.accounts.price_b, 
                     position.decimals)?;
-            position.get_profit(&current_price, data.message.time)?
+            position.get_profit(&current_price, authenticated.data.time)?
         };
 
         Ok(returned_margin)
@@ -167,19 +171,13 @@ pub mod scale_protocol {
 
 #[derive(Debug, Clone, Copy, AnchorDeserialize, AnchorSerialize)]
 pub struct PositionArgs {
-    // the ask/bid price when user signed the transaction
     pub price: u64,
     pub expo: i32,
     pub decimals: u8,
-    // the amount of Y user want to buy/sell, include the leverage, so the user paid is hands / leverage
     pub leverage_margin: u64,
-    // max 100
     pub leverage: u64,
-    // isolated or cross
     pub ptype: PositionType,
-    // long or short
     pub direction: Direction,
-    // the real ask/bid price user can accept
     pub slippage_numerator: u64,
     pub margin_rate_numerator: u64,
 }
@@ -215,6 +213,7 @@ pub enum PositionStatus {
 pub struct Position {
     pub pool: Pubkey,
     pub owner: Pubkey,
+    pub authority: Pubkey,
     pub index: u32,
     pub status: PositionStatus,
     pub ptype: PositionType,
@@ -222,21 +221,23 @@ pub struct Position {
     pub decimals: u8,
     pub leverage: u64,
     pub last_price: i64,
+    pub last_conf: u64,
     pub margin: u64,
     pub margin_rate_numerator: u64,
     pub overnight_fee_numerator: u64,
     pub liquidation: u64,
     pub created_at: i64,
     pub slot: u64,
-    // the amount of asset user hold on, include the leverage
     pub amount: String,
 }
 
 impl Position {
     pub const LEN: usize = 32
         + 32
+        + 32
         + 4
         + 1 + 1 + 1 + 1
+        + 8
         + 8
         + 8
         + 8
@@ -399,28 +400,63 @@ pub struct LiquidatedData {
     pub time: i64,
     pub slot: u64,
 }
-#[derive(Debug, Clone, PartialOrd, PartialEq, AnchorDeserialize, AnchorSerialize)]
-pub struct ProcessData {
-    pub message: LiquidatedData,
-    pub pubkey: Pubkey,
-    pub signature: Vec<u8>,
+
+#[derive(Debug, Clone, Copy)]
+pub struct AuthenticatedData {
+    pub data: LiquidatedData,
+    pub authority: Pubkey,
 }
 
-impl ProcessData {
-    pub fn verify(&self) -> Result<()> {
-        let mut buf = vec![];
-        self.message.serialize(&mut buf)?;
-        anchor_lang::solana_program::program::invoke(
-            &new_ed25519_program_instruction(
-                &self.signature,
-                &self.pubkey.to_bytes(),
-                &buf,
-            ),
-            &[],
-        ).map_err(|e| e.into())
+pub fn verify_and_extract(instruction_sysvar_account_info: &AccountInfo) -> Result<AuthenticatedData> {
+    use anchor_lang::solana_program;
+    let current_instruction = solana_program::sysvar::instructions::load_current_index_checked(instruction_sysvar_account_info)?;
+    if current_instruction == 0 {
+        return err!(ProtocolError::InstructionAtWrongIndex);
     }
-}
 
+    let ed25519_ix_index = (current_instruction - 1) as usize;
+    let ed25519_ix = solana_program::sysvar::instructions::load_instruction_at_checked(
+        ed25519_ix_index,
+        instruction_sysvar_account_info,
+    )
+    .map_err(|_| ProtocolError::InvalidAccountData)?;
+
+    if ed25519_ix.program_id != solana_program::ed25519_program::id() {
+        return err!(ProtocolError::InvalidEd25519Instruction);
+    }
+
+    let sig_len = ed25519_ix.data[0];
+    if sig_len != 1 {
+        return err!(ProtocolError::InvalidEd25519Instruction);
+    }
+
+    let mut index = 2;
+    let _sig_offset = byteorder::LE::read_u16(&ed25519_ix.data[index..index+2]) as usize;
+    index += 2;
+    let sig_ix = byteorder::LE::read_u16(&ed25519_ix.data[index..index+2]);
+    index += 2;
+    let pubkey_offset = byteorder::LE::read_u16(&ed25519_ix.data[index..index+2]) as usize;
+    index += 2;
+    let pubkey_ix = byteorder::LE::read_u16(&ed25519_ix.data[index..index+2]);
+    index += 2;
+    let data_offset = byteorder::LE::read_u16(&ed25519_ix.data[index..index+2]) as usize;
+    index += 2;
+    let data_size = byteorder::LE::read_u16(&ed25519_ix.data[index..index+2]) as usize;
+    index += 2;
+    let data_ix = byteorder::LE::read_u16(&ed25519_ix.data[index..index+2]);
+
+    if pubkey_ix != u16::MAX || data_ix != u16::MAX || sig_ix != u16::MAX {
+        return err!(ProtocolError::InvalidEd25519Instruction);
+    }
+
+    let authority = Pubkey::try_from_slice(&ed25519_ix.data[pubkey_offset..pubkey_offset + 32])?;
+    let data: LiquidatedData = AnchorDeserialize::try_from_slice(&ed25519_ix.data[data_offset..data_offset+data_size])?;
+
+    Ok(AuthenticatedData {
+        data,
+        authority,
+    })
+}
 
 #[derive(Accounts)]
 pub struct ProcessPosition<'info> {
@@ -436,9 +472,9 @@ pub struct ProcessPosition<'info> {
     pub position: Account<'info, Position>,
     pub system_program: Program<'info, System>,
     #[account(
-        constraint = ed25519_program.key() == anchor_lang::solana_program::ed25519_program::id(),
+        constraint = instruction_sysvar_account_info.key() == anchor_lang::solana_program::sysvar::instructions::id(),
     )]
-    pub ed25519_program: AccountInfo<'info>,
+    pub instruction_sysvar_account_info: AccountInfo<'info>,
 }
 
 fn get_current_price<'a>(price_a: &'a UncheckedAccount, price_b: &'a UncheckedAccount, decimals: u8) -> Result<pyth_sdk_solana::Price> {
@@ -507,72 +543,4 @@ fn check_slippage<'a>(price: &'a BigDecimal, args: PositionArgs) -> Result<()> {
         }
     }
     Ok(())
-}
-
-pub const PUBKEY_SERIALIZED_SIZE: usize = 32;
-pub const SIGNATURE_SERIALIZED_SIZE: usize = 64;
-pub const SIGNATURE_OFFSETS_SERIALIZED_SIZE: usize = 14;
-// bytemuck requires structures to be aligned
-pub const SIGNATURE_OFFSETS_START: usize = 2;
-pub const DATA_START: usize = SIGNATURE_OFFSETS_SERIALIZED_SIZE + SIGNATURE_OFFSETS_START;
-#[derive(Default, Debug, Copy, Clone, Zeroable, Pod)]
-#[repr(C)]
-pub struct Ed25519SignatureOffsets {
-    signature_offset: u16,             // offset to ed25519 signature of 64 bytes
-    signature_instruction_index: u16,  // instruction index to find signature
-    public_key_offset: u16,            // offset to public key of 32 bytes
-    public_key_instruction_index: u16, // instruction index to find public key
-    message_data_offset: u16,          // offset to start of message data
-    message_data_size: u16,            // size of message data
-    message_instruction_index: u16,    // index of instruction data to get message data
-}
-
-fn new_ed25519_program_instruction<'a>(signature: &'a [u8], pubkey: &'a [u8], message: &'a [u8]) -> Instruction {
-    assert_eq!(pubkey.len(), PUBKEY_SERIALIZED_SIZE);
-    assert_eq!(signature.len(), SIGNATURE_SERIALIZED_SIZE);
-
-    let mut instruction_data = Vec::with_capacity(
-        DATA_START
-            .saturating_add(SIGNATURE_SERIALIZED_SIZE)
-            .saturating_add(PUBKEY_SERIALIZED_SIZE)
-            .saturating_add(message.len()),
-    );
-
-    let num_signatures: u8 = 1;
-    let public_key_offset = DATA_START;
-    let signature_offset = public_key_offset.saturating_add(PUBKEY_SERIALIZED_SIZE);
-    let message_data_offset = signature_offset.saturating_add(SIGNATURE_SERIALIZED_SIZE);
-
-    // add padding byte so that offset structure is aligned
-    instruction_data.extend_from_slice(bytes_of(&[num_signatures, 0]));
-
-    let offsets = Ed25519SignatureOffsets {
-        signature_offset: signature_offset as u16,
-        signature_instruction_index: u16::MAX,
-        public_key_offset: public_key_offset as u16,
-        public_key_instruction_index: u16::MAX,
-        message_data_offset: message_data_offset as u16,
-        message_data_size: message.len() as u16,
-        message_instruction_index: u16::MAX,
-    };
-
-    instruction_data.extend_from_slice(bytes_of(&offsets));
-
-    debug_assert_eq!(instruction_data.len(), public_key_offset);
-
-    instruction_data.extend_from_slice(&pubkey);
-
-    debug_assert_eq!(instruction_data.len(), signature_offset);
-
-    instruction_data.extend_from_slice(&signature);
-
-    debug_assert_eq!(instruction_data.len(), message_data_offset);
-
-    instruction_data.extend_from_slice(message);
-
-    Instruction {
-        program_id: anchor_lang::solana_program::ed25519_program::id(),
-        accounts: vec![],
-        data: instruction_data,
-    }
 }
