@@ -78,7 +78,19 @@ impl TransactionAccount {
         None
     }
 
-    pub fn sell_to_close_profit(&self, price: &pyth_sdk_solana::Price, days: u64) -> Option<i128> {
+    /*
+    .checked_sub(
+        self.initial_margin()?
+            .checked_mul(self.leverage)?
+            .checked_mul(self.financing_rate.numerator)?
+            .checked_div(self.financing_rate.denominator)?
+            .checked_mul(days)?
+            .checked_div(365)?
+            .try_into()
+            .ok()?
+    )
+    */
+    pub fn sell_to_close_profit(&self, price: &pyth_sdk_solana::Price) -> Option<i128> {
         if self.direction == Direction::OpenLong {
             let diff = (price.price)
                 .checked_sub(price.conf as i64)?
@@ -86,23 +98,25 @@ impl TransactionAccount {
             dbg!(diff);
             return (self.shares() as i128)
                 .checked_mul(diff as i128)?
-                .checked_div(10i128.pow(self.asset_decimals))?
-                .checked_sub(
-                    self.initial_margin()?
-                        .checked_mul(self.leverage)?
-                        .checked_mul(self.financing_rate.numerator)?
-                        .checked_div(self.financing_rate.denominator)?
-                        .checked_mul(days)?
-                        .checked_div(365)?
-                        .try_into()
-                        .ok()?
-                );
+                .checked_div(10i128.pow(self.asset_decimals));
                 
         }
         None
     }
 
-    pub fn buy_to_close_profit(&self, price: &pyth_sdk_solana::Price, days: u64) -> Option<i128> {
+    /*
+    .checked_sub(
+        self.initial_margin()?
+            .checked_mul(self.leverage)?
+            .checked_mul(self.financing_rate.numerator)?
+            .checked_div(self.financing_rate.denominator)?
+            .checked_mul(days)?
+            .checked_div(365)?
+            .try_into()
+            .ok()?
+    )
+     */
+    pub fn buy_to_close_profit(&self, price: &pyth_sdk_solana::Price) -> Option<i128> {
         if self.direction == Direction::OpenShort {
             let diff = self.sell_to_open_price()?
                 .checked_sub(
@@ -111,19 +125,28 @@ impl TransactionAccount {
                 )?;
             return (self.shares() as i128)
                 .checked_mul(diff as i128)?
-                .checked_div(10i128.pow(self.asset_decimals))?
-                .checked_sub(
-                    self.initial_margin()?
-                        .checked_mul(self.leverage)?
-                        .checked_mul(self.financing_rate.numerator)?
-                        .checked_div(self.financing_rate.denominator)?
-                        .checked_mul(days)?
-                        .checked_div(365)?
-                        .try_into()
-                        .ok()?
-                );
+                .checked_div(10i128.pow(self.asset_decimals));
         }
         None
+    }
+
+    pub fn get_profit(&self, price: &pyth_sdk_solana::Price, days: u64) -> Option<i128> {
+        let gross = match self.direction {
+            Direction::OpenLong => self.sell_to_close_profit(price)?,
+            Direction::OpenShort => self.buy_to_close_profit(price)?,
+        };
+
+        gross
+            .checked_sub(
+                self.initial_margin()?
+                    .checked_mul(self.leverage)?
+                    .checked_mul(self.financing_rate.numerator)?
+                    .checked_div(self.financing_rate.denominator)?
+                    .checked_mul(days)?
+                    .checked_div(365)?
+                    .try_into()
+                    .ok()?
+            )
     }
 }
 
@@ -162,10 +185,8 @@ mod tests {
         let price_day10 = btc2.get_price_in_quote(&usdc2, -6).unwrap();
 
         assert!(price_day1.price == 30000_000_000);
-        assert!(price_day1.conf == 12_500_000);
         assert!(price_day1.expo == -6);
         assert!(price_day10.price == 32000_000_000);
-        assert!(price_day10.conf == 13_000_000);
         assert!(price_day10.expo == -6);
     }
 
@@ -198,7 +219,7 @@ mod tests {
         dbg!(account.initial_margin());
         dbg!(account.initial_price());
         dbg!(account.buy_to_open_price());
-        dbg!(account.sell_to_open_price());
+        assert!(account.sell_to_open_price().is_none());
 
         let btc2 = pyth_sdk_solana::Price {
             price: 32000_0000_0000,
@@ -214,7 +235,156 @@ mod tests {
 
         let price_day10 = btc2.get_price_in_quote(&usdc2, -6).unwrap();
 
-        dbg!(account.sell_to_close_profit(&price_day10, 10));
-        dbg!(account.buy_to_close_profit(&price_day10, 10));
+        dbg!(account.sell_to_close_profit(&price_day10));
+        assert!(account.buy_to_close_profit(&price_day10).is_none());
+
+        let btc3 = pyth_sdk_solana::Price {
+            price: 29800_0000_0000,
+            conf: 5_0000_0000,
+            expo: -8,
+        };
+
+        let usdc3 = pyth_sdk_solana::Price {
+            price: 1_0000_0000,
+            conf: 2_5000,
+            expo: -8,
+        };
+
+        let price_day5 = btc3.get_price_in_quote(&usdc3, -6).unwrap();
+
+        dbg!(account.get_profit(&price_day5, 5));
+    }
+
+    #[test]
+    fn test_open_short() {
+        let btc = pyth_sdk_solana::Price {
+            price: 30000_0000_0000,
+            conf: 5_0000_0000,
+            expo: -8,
+        };
+
+        let usdc = pyth_sdk_solana::Price {
+            price: 1_0000_0000,
+            conf: 2_5000,
+            expo: -8,
+        };
+
+        let price_day1 = btc.get_price_in_quote(&usdc, -6).unwrap();
+
+        let account = TransactionAccount {
+            direction: Direction::OpenShort,
+            ptype: PositionType::Isolated,
+            initial_shares_price: price_day1.into(),
+            asset_decimals: 6,
+            shares_with_decimals: 1000000,
+            leverage: 100,
+            financing_rate: Rate { numerator: 300, denominator: 10000 },
+        };
+
+        dbg!(account.initial_margin());
+        dbg!(account.initial_price());
+        assert!(account.buy_to_open_price().is_none());
+        dbg!(account.sell_to_open_price());
+
+        let btc2 = pyth_sdk_solana::Price {
+            price: 28000_0000_0000,
+            conf: 5_0000_0000,
+            expo: -8,
+        };
+
+        let usdc2 = pyth_sdk_solana::Price {
+            price: 1_0000_0000,
+            conf: 2_5000,
+            expo: -8,
+        };
+
+        let price_day5 = btc2.get_price_in_quote(&usdc2, -6).unwrap();
+
+        assert!(account.sell_to_close_profit(&price_day5).is_none());
+        dbg!(account.get_profit(&price_day5, 5));
+
+        let btc3 = pyth_sdk_solana::Price {
+            price: 30200_0000_0000,
+            conf: 5_0000_0000,
+            expo: -8,
+        };
+
+        let usdc3 = pyth_sdk_solana::Price {
+            price: 1_0000_0000,
+            conf: 2_5000,
+            expo: -8,
+        };
+
+        let price_day10 = btc3.get_price_in_quote(&usdc3, -6).unwrap();
+
+        dbg!(account.get_profit(&price_day10, 10));
+        assert!(account.get_profit(&price_day10, 10).unwrap() < -200_000_000);
+    }
+
+    #[test]
+    fn test_open_long_and_sell_quickly() {
+        let btc = pyth_sdk_solana::Price {
+            price: 30000_0000_0000,
+            conf: 5_0000_0000,
+            expo: -8,
+        };
+
+        let usdc = pyth_sdk_solana::Price {
+            price: 1_0000_0000,
+            conf: 2_5000,
+            expo: -8,
+        };
+
+        let price_day1 = btc.get_price_in_quote(&usdc, -6).unwrap();
+
+        dbg!(price_day1);
+
+        let account = TransactionAccount {
+            direction: Direction::OpenLong,
+            ptype: PositionType::Isolated,
+            initial_shares_price: price_day1.into(),
+            asset_decimals: 6,
+            shares_with_decimals: 1000000,
+            leverage: 100,
+            financing_rate: Rate { numerator: 300, denominator: 10000 },
+        };
+
+        dbg!(account.buy_to_open_price());
+        dbg!(account.get_profit(&price_day1, 1));
+    }
+
+    #[test]
+    fn test_open_short_and_buy_quickly() {
+        let btc = pyth_sdk_solana::Price {
+            price: 30000_0000_0000,
+            conf: 5_0000_0000,
+            expo: -8,
+        };
+
+        let usdc = pyth_sdk_solana::Price {
+            price: 1_0000_0000,
+            conf: 2_5000,
+            expo: -8,
+        };
+
+        let price_day1 = btc.get_price_in_quote(&usdc, -6).unwrap();
+
+        dbg!(price_day1);
+
+        let account = TransactionAccount {
+            direction: Direction::OpenShort,
+            ptype: PositionType::Isolated,
+            initial_shares_price: price_day1.into(),
+            asset_decimals: 6,
+            shares_with_decimals: 1000000,
+            leverage: 100,
+            financing_rate: Rate { numerator: 300, denominator: 10000 },
+        };
+
+        let profit = account.get_profit(&price_day1, 1);
+        dbg!(account.sell_to_open_price());
+        dbg!(profit);
+
+        assert!(profit.unwrap().is_negative());
     }
 }
