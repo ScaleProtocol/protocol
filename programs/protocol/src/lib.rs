@@ -1,3 +1,5 @@
+mod price;
+
 use anchor_lang::prelude::*;
 use byteorder::ByteOrder;
 
@@ -50,47 +52,7 @@ pub mod protocol {
         position.slot = Clock::get()?.slot;
         position.decimals = args.decimals;
 
-        if args.leverage > MAX_LEVERAGE {
-            return err!(ProtocolError::InvalidLeverage);
-        }
-
-        let current_price = get_current_price(&ctx.accounts.price_a, &ctx.accounts.price_b, args.decimals)?;
-        position.last_price = current_price.price;
-        position.liquidation = get_liquidation(
-            current_price.price,
-            position.bond(),
-            args.direction,
-        );
-
-        match args.ptype {
-            PositionType::Isolated => {
-                match args.direction {
-                    Direction::Long => {
-                        let ask =
-                            (current_price.price as u64)
-                                .checked_add(current_price.conf)
-                                .ok_or(ProtocolError::InvalidPrice)?;
-
-                        check_slippage(ask, args)?;
-
-                        position.amount = get_asset_amount(args.leverage_margin, ask);
-                    }
-                    Direction::Short => {
-                        let bid = 
-                            (current_price.price as u64)
-                                .checked_sub(current_price.conf)
-                                .ok_or(ProtocolError::InvalidPrice)?;
-
-                        check_slippage(bid, args)?;
-
-                        position.amount = get_asset_amount(args.leverage_margin, bid);
-                    }
-                }
-            }
-            PositionType::Cross => unimplemented!(),
-        };
-
-        Ok(())
+        unimplemented!();
     }
 
     /// TODO
@@ -106,21 +68,7 @@ pub mod protocol {
             return err!(ProtocolError::PositionLiquidated);
         }
 
-        use Direction::*;
-        match (args.direction, position.direction) {
-            (Long, Long) => {
-                unimplemented!()
-            }
-            (Short, Short) => {
-                unimplemented!()
-            }
-            (Long, Short) => {
-                unimplemented!()
-            }
-            (Short, Long) => {
-                unimplemented!()
-            }
-        }
+        unimplemented!()
     }
 
     pub fn increase_margin(ctx: Context<IncreaseMargin>, amount: u64) -> Result<()> {
@@ -195,8 +143,14 @@ pub enum PositionType {
 }
 #[derive(Debug, Clone, Copy, PartialOrd, PartialEq, AnchorDeserialize, AnchorSerialize)]
 pub enum Direction {
-    Long,
-    Short,
+    OpenLong,
+    OpenShort,
+}
+
+#[derive(Debug, Clone, Copy, PartialOrd, PartialEq, AnchorDeserialize, AnchorSerialize)]
+pub struct Rate {
+    pub numerator: u64,
+    pub denominator: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialOrd, PartialEq, AnchorDeserialize, AnchorSerialize)]
@@ -248,8 +202,8 @@ impl Position {
     #[inline(always)]
     pub fn is_liquidated(&self, price: u64) -> bool {
         match self.direction {
-            Direction::Long => price <= self.liquidation,
-            Direction::Short => price >= self.liquidation,
+            Direction::OpenLong => price <= self.liquidation,
+            Direction::OpenShort => price >= self.liquidation,
         }
     }
 
@@ -282,17 +236,6 @@ impl Position {
         let overnight_fee = self.overnight_fee(time);
         self.maintainance_margin()
             .checked_sub(overnight_fee as u64).unwrap()
-    }
-
-    pub fn get_profit(&self, current_price: &pyth_sdk_solana::Price, time: i64) -> Result<u64> {
-        Ok(match self.direction {
-            Direction::Long => {
-                unimplemented!()
-            }
-            Direction::Short => {
-                unimplemented!()
-            }
-        })
     }
 }
 
@@ -461,11 +404,11 @@ fn get_current_price<'a>(price_a: &'a UncheckedAccount, price_b: &'a UncheckedAc
 fn get_liquidation(price: i64, bond: u64, direction: Direction) -> u64 {
     // the price
     match direction {
-        Direction::Long => {
+        Direction::OpenLong => {
             (price as u64)
                 .checked_sub(bond).unwrap()
         }
-        Direction::Short => {
+        Direction::OpenShort => {
             (price as u64)
                 .checked_add(bond).unwrap()
         }
@@ -486,7 +429,7 @@ fn check_slippage(price: u64, args: PositionArgs) -> Result<()> {
             .ok_or(ProtocolError::InvalidPrice)?;
 
     match args.direction {
-        Direction::Long => {
+        Direction::OpenLong => {
             // the real price is higher than the given price
             let real_price = price_before
                 .checked_mul(args.slippage_numerator + 10000).unwrap()
@@ -495,7 +438,7 @@ fn check_slippage(price: u64, args: PositionArgs) -> Result<()> {
                 return err!(ProtocolError::SlippageReached);
             }
         }
-        Direction::Short => {
+        Direction::OpenShort => {
             // the real price is lower than the given price
             let real_price = price_before
                 .checked_mul(10000 - args.slippage_numerator).unwrap()
