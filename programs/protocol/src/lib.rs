@@ -100,17 +100,7 @@ pub mod protocol {
 
         require_eq!(authenticated.authority, position.authority, ProtocolError::InvalidAuthority);
 
-        let returned_margin = if authenticated.data.is_liquidated {
-            position.get_liquidated_margin(authenticated.data.time)
-        } else {
-            let current_price = get_current_price(
-                    &ctx.accounts.price_a, 
-                    &ctx.accounts.price_b, 
-                    position.decimals)?;
-            position.get_profit(&current_price, authenticated.data.time)?
-        };
-
-        Ok(returned_margin)
+        unimplemented!();
     }
 }
 
